@@ -1,8 +1,13 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Optional
+from bson import ObjectId
 
-app = FastAPI()
+from database import db, create_document, get_documents
+
+app = FastAPI(title="3D Printing Service API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -12,17 +17,101 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
+# Schemas
+from schemas import Printer, ContactMessage, SocialLink
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+# Helpers
+
+def oid(s: str) -> ObjectId:
+    try:
+        return ObjectId(s)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid id")
+
+# Public endpoints
+
+@app.get("/")
+def root():
+    return {"service": "3D Printing", "status": "ok"}
+
+@app.get("/api/products", response_model=List[Printer])
+def list_products():
+    items = get_documents("printer", {"available": True})
+    for it in items:
+        it["id"] = str(it.get("_id"))
+        it.pop("_id", None)
+    return items
+
+class ContactIn(ContactMessage):
+    pass
+
+@app.post("/api/contact")
+def submit_contact(payload: ContactIn):
+    doc_id = create_document("contactmessage", payload)
+    return {"ok": True, "id": doc_id}
+
+@app.get("/api/socials", response_model=List[SocialLink])
+def get_socials():
+    items = get_documents("sociallink", {"visible": True})
+    for it in items:
+        it["id"] = str(it.get("_id"))
+        it.pop("_id", None)
+    return items
+
+# Admin models
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+# Extremely simple admin session using env vars (for demo)
+ADMIN_USER = os.getenv("ADMIN_USER", "admin")
+ADMIN_PASS = os.getenv("ADMIN_PASS", "admin123")
+SESSION_TOKEN = os.getenv("ADMIN_TOKEN", "changeme-token")
+
+def check_auth(token: Optional[str]):
+    if token != SESSION_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+@app.post("/api/admin/login")
+def admin_login(body: LoginRequest):
+    if body.username == ADMIN_USER and body.password == ADMIN_PASS:
+        return {"token": SESSION_TOKEN}
+    raise HTTPException(status_code=401, detail="Invalid credentials")
+
+# Admin CRUD
+
+@app.get("/api/admin/products", response_model=List[Printer])
+def admin_list_products(token: str):
+    check_auth(token)
+    items = get_documents("printer")
+    for it in items:
+        it["id"] = str(it.get("_id"))
+        it.pop("_id", None)
+    return items
+
+@app.post("/api/admin/products")
+def admin_create_product(payload: Printer, token: str):
+    check_auth(token)
+    new_id = create_document("printer", payload)
+    return {"id": new_id}
+
+@app.get("/api/admin/contacts")
+def admin_list_contacts(token: str):
+    check_auth(token)
+    items = get_documents("contactmessage")
+    for it in items:
+        it["id"] = str(it.get("_id"))
+        it.pop("_id", None)
+    return items
+
+@app.post("/api/admin/socials")
+def admin_add_social(link: SocialLink, token: str):
+    check_auth(token)
+    new_id = create_document("sociallink", link)
+    return {"id": new_id}
 
 @app.get("/test")
 def test_database():
-    """Test endpoint to check if database is available and accessible"""
     response = {
         "backend": "✅ Running",
         "database": "❌ Not Available",
@@ -31,39 +120,22 @@ def test_database():
         "connection_status": "Not Connected",
         "collections": []
     }
-    
     try:
-        # Try to import database module
-        from database import db
-        
         if db is not None:
             response["database"] = "✅ Available"
             response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
+            response["database_name"] = db.name
             response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
-            try:
-                collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
-                response["database"] = "✅ Connected & Working"
-            except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
-        else:
-            response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
+            collections = db.list_collection_names()
+            response["collections"] = collections[:10]
+            response["database"] = "✅ Connected & Working"
     except Exception as e:
         response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
-    return response
 
+    import os as _os
+    response["database_url"] = "✅ Set" if _os.getenv("DATABASE_URL") else "❌ Not Set"
+    response["database_name"] = "✅ Set" if _os.getenv("DATABASE_NAME") else "❌ Not Set"
+    return response
 
 if __name__ == "__main__":
     import uvicorn
